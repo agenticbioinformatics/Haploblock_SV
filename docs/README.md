@@ -16,6 +16,17 @@ Installation and run commands are in the top-level [README](../README.md). The d
 
 Stage numbers match the original project plan; Stage 3 (boundary enrichment) was dropped. Each stage copies its input `config.yaml`, adds its own output paths and thresholds, and writes the result to its output directory, so a later stage only needs the config of the stage before it.
 
+Shared modules used by the stage scripts:
+
+| Module | Contents |
+|---|---|
+| `sv_table.py` | SV table schema (`METADATA_COLUMNS`), VCF record parsing, VCF → per-chromosome `sv_genotypes` tables |
+| `haploblock_clusters.py` | Download, cache and parse haploblock cluster files from data.haploblocks.org |
+| `cluster_inference.py` | Stage 1 EM model assigning SVs to clusters, result tables and resumable runs |
+| `genotypes.py` | `GT` strings → allele counts/dosage; Benjamini–Hochberg correction |
+| `stage_io.py` | Reading/validating stage configs and tables, carrying configs forward, CLI error handling |
+| `synthetic_data.py` | Toy dataset and the `--test` self-test used by every stage |
+
 The pipeline overview diagram is [flowchart_haploblock_SV.png](flowchart_haploblock_SV.png). Hackathon planning notes are kept in [PROMPTS.md](PROMPTS.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## The question the pipeline answers

@@ -7,7 +7,7 @@ import pandas as pd
 
 from genotypes import dosage_matrix_from_genotypes, dosage_table
 import stage7_hash_representation
-from sv_contract import METADATA_COLUMNS
+from sv_table import METADATA_COLUMNS
 
 
 def test_dosage_fast_path_falls_back_for_multiallelic_genotypes() -> None:

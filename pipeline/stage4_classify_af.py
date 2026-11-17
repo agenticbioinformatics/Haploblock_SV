@@ -26,7 +26,7 @@ import pandas as pd
 
 from genotypes import genotype_counts, genotype_samples
 from stage_io import load_config, read_sample_metadata, read_tsv, run_cli, write_stage_config
-from sv_contract import METADATA_COLUMNS
+from sv_table import METADATA_COLUMNS
 
 
 log = logging.getLogger("stage4_classify_af")
@@ -150,119 +150,59 @@ def load_haploblock_assignments(config: dict) -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True).drop_duplicates()
 
 
-def write_informative_summary(
-    classification_haploblocks: pd.DataFrame,
-    output_dir: Path,
-) -> None:
-    """Write summary tables for population-specific SVs and haploblocks."""
-
-    data = classification_haploblocks.copy()
-    data["has_haploblock"] = data["haploblock_id"].notna()
-
-    # One row per SV for overall classification counts.
-    sv_level = (
-        data.groupby("sv_record_id", as_index=False)
-        .agg(
-            sv_class=("sv_class", "first"),
-            specific_to_population=("specific_to_population", "first"),
-            haploblock_count=("haploblock_id", "nunique"),
-            has_haploblock=("has_haploblock", "any"),
-        )
+def write_informative_summary(classification_haploblocks: pd.DataFrame, output_dir: Path) -> None:
+    """Write overall, per-population and per-haploblock summaries of the SV classes."""
+    data = classification_haploblocks
+    sv_level = data.groupby("sv_record_id").agg(
+        sv_class=("sv_class", "first"), has_haploblock=("haploblock_id", lambda ids: ids.notna().any())
     )
+    overall_summary = pd.DataFrame([{
+        "total_unique_svs": len(sv_level),
+        "common_svs": int(sv_level["sv_class"].eq("common").sum()),
+        "population_specific_svs": int(sv_level["sv_class"].eq("population_specific").sum()),
+        "other_svs": int(sv_level["sv_class"].eq("other").sum()),
+        "svs_overlapping_haploblocks": int(sv_level["has_haploblock"].sum()),
+        "svs_outside_haploblocks": int((~sv_level["has_haploblock"]).sum()),
+    }])
+    overall_summary.to_csv(output_dir / "stage4_summary.tsv", sep="\t", index=False)
 
-    overall_summary = pd.DataFrame(
-        [
-            {
-                "total_unique_svs": sv_level["sv_record_id"].nunique(),
-                "common_svs": int((sv_level["sv_class"] == "common").sum()),
-                "population_specific_svs": int(
-                    (sv_level["sv_class"] == "population_specific").sum()
-                ),
-                "other_svs": int((sv_level["sv_class"] == "other").sum()),
-                "svs_overlapping_haploblocks": int(
-                    sv_level["has_haploblock"].sum()
-                ),
-                "svs_outside_haploblocks": int(
-                    (~sv_level["has_haploblock"]).sum()
-                ),
-            }
-        ]
-    )
-    overall_summary.to_csv(
-        output_dir / "stage4_summary.tsv",
-        sep="\t",
-        index=False,
-    )
+    # Each SV counted once per haploblock it overlaps.
+    in_blocks = data.dropna(subset=["haploblock_id"]).drop_duplicates(["sv_record_id", "haploblock_id"])
+    specific = in_blocks[in_blocks["sv_class"] == "population_specific"]
 
-    # One row per population-specific SV and population.
     population_summary = (
-        data[data["sv_class"] == "population_specific"]
-        .dropna(subset=["haploblock_id"])
-        .groupby("specific_to_population", as_index=False)
-        .agg(
-            population_specific_svs=("sv_record_id", "nunique"),
-            haploblocks=("haploblock_id", "nunique"),
-        )
-        .rename(
-            columns={
-                "specific_to_population": "population",
-            }
-        )
-        .sort_values("population")
+        specific.groupby("specific_to_population")
+        .agg(population_specific_svs=("sv_record_id", "nunique"), haploblocks=("haploblock_id", "nunique"))
+        .rename_axis("population").reset_index()
     )
-    population_summary.to_csv(
-        output_dir / "population_specific_summary.tsv",
-        sep="\t",
-        index=False,
+    population_summary.to_csv(output_dir / "population_specific_summary.tsv", sep="\t", index=False)
+
+    populations_per_block = specific.groupby("haploblock_id")["specific_to_population"].agg(
+        lambda populations: ", ".join(sorted(set(populations)))
     )
-
-    # One row per haploblock. Use nunique because one SV can produce
-    # multiple rows when it overlaps multiple blocks.
-    block_data = data.dropna(subset=["haploblock_id"])
-
     block_summary = (
-        block_data.groupby("haploblock_id", as_index=False)
+        in_blocks.assign(
+            common=in_blocks["sv_class"].eq("common"),
+            population_specific=in_blocks["sv_class"].eq("population_specific"),
+        )
+        .groupby("haploblock_id")
         .agg(
-            total_svs=("sv_record_id", "nunique"),
-            common_svs=(
-                "sv_record_id",
-                lambda values: values[
-                    block_data.loc[values.index, "sv_class"] == "common"
-                ].nunique(),
-            ),
-            population_specific_svs=(
-                "sv_record_id",
-                lambda values: values[
-                    block_data.loc[values.index, "sv_class"]
-                    == "population_specific"
-                ].nunique(),
-            ),
-            populations_with_specific_svs=(
-                "specific_to_population",
-                lambda values: ", ".join(sorted(set(values.dropna()))),
-            ),
+            total_svs=("sv_record_id", "size"),
+            common_svs=("common", "sum"),
+            population_specific_svs=("population_specific", "sum"),
             block_start=("block_start", "first"),
             block_end=("block_end", "first"),
         )
-        .sort_values(
-            ["population_specific_svs", "total_svs"],
-            ascending=[False, False],
-        )
+        .join(populations_per_block.rename("populations_with_specific_svs"))
+        .fillna({"populations_with_specific_svs": ""})
+        .reset_index()
+        [["haploblock_id", "total_svs", "common_svs", "population_specific_svs",
+          "populations_with_specific_svs", "block_start", "block_end"]]
+        .sort_values(["population_specific_svs", "total_svs"], ascending=False)
     )
+    block_summary.to_csv(output_dir / "haploblock_population_specific_summary.tsv", sep="\t", index=False)
 
-    block_summary.to_csv(
-        output_dir / "haploblock_population_specific_summary.tsv",
-        sep="\t",
-        index=False,
-    )
-
-    log.info("Stage 4 summary:")
-    for column, value in overall_summary.iloc[0].items():
-        log.info("  %s: %s", column, value)
-    log.info(
-        "Wrote %s",
-        output_dir / "haploblock_population_specific_summary.tsv",
-    )
+    log.info("Stage 4 summary: %s", overall_summary.iloc[0].to_dict())
 
 
 def write_stage4_plots(

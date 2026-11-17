@@ -219,3 +219,47 @@ Changes:
   Created branch code-review-fixes from main and committed the Prompt 3
   changes (including this prompt_history entry) with the requested message.
   Nothing was pushed.
+
+Prompt 5 - Merge/split scripts where logical; keep the code minimal
+--------------------------------------------------------------------
+Request:
+  "to finish up the post-hackathon clean up : merge scripts where logical or
+  separate one script into two where logical, if necessary or keep as is if
+  not necessary. make the code minimalistic and easy to understand. the
+  code should be simple without over-doing or over-complicating."
+
+Decisions:
+  - Split: cluster_inference.py (1184 lines) mixed three jobs. Functions were
+    moved verbatim (via ast, no retyping):
+      VCF -> per-chromosome tables  -> sv_table.py (was sv_contract.py,
+                                       renamed: "contract" was jargon)
+      cluster file download/parsing -> new haploblock_clusters.py
+      EM model, result writer, resume -> cluster_inference.py (778 lines)
+  - No merges: each stage script is one independently runnable stage;
+    merging any would make them longer and harder to follow. The small
+    shared modules each have one clear job.
+  - Local simplifications (behaviour unchanged):
+      cluster_inference.py: nonzero_counts() replaces 4 repeated QC-bin dicts.
+      stage0_merge_vcfs.py: run_command/capture_command merged into
+        run_command(command, capture=False); tool progress still streams.
+      stage7_hash_representation.py: fill_sv_metadata() replaces two
+        identical 10-line metadata-merge blocks.
+      stage4_classify_af.py: write_informative_summary rewritten (116 -> 50
+        lines) without per-group lambdas indexing back into the frame.
+  - Bug fixed on the way: Stage 4 populations_with_specific_svs started with
+    ", " (e.g. ", PEL") because "" from non-specific SVs was joined in.
+
+Verification: 41/41 tests pass (new Stage 4 summary test, confirmed to fail
+on the old code); pyflakes clean; --test passes for Stages 1-9; running the
+old (HEAD) and new code on the same synthetic data gives byte-identical
+outputs for all 26 tables of Stages 1-9 and report.md.
+docs/README.md: added a table of the shared modules. Not committed.
+
+Prompt 6 - Commit the restructuring
+-----------------------------------
+Request:
+  "commit this with a message "split cluster_inference and simplify code""
+
+Changes:
+  Committed the Prompt 5 changes (and this entry) on the existing branch
+  code-review-fixes with the requested message. Nothing was pushed.

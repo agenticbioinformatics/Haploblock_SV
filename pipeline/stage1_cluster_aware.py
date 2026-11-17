@@ -14,16 +14,11 @@ from pathlib import Path
 
 import yaml
 
-from cluster_inference import (
-    ALL_CHROMS,
-    DEFAULT_BASE_URL,
-    InferenceSettings,
-    read_vcf_samples,
-    request_with_retries,
-)
+from cluster_inference import ALL_CHROMS, InferenceSettings
 from cluster_inference import run as run_cluster_aware
+from haploblock_clusters import DEFAULT_BASE_URL, request_with_retries
 from stage_io import DEFAULT_BOUNDARY_DISTANCE_BP, run_cli
-from sv_contract import canonical_sample_id, normalize_chrom
+from sv_table import canonical_sample_id, normalize_chrom, read_vcf_samples
 
 
 log = logging.getLogger("stage1_cluster_aware")

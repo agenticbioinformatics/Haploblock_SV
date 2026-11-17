@@ -18,7 +18,7 @@ import pandas as pd
 
 from genotypes import dosage_table, genotype_samples
 from stage_io import load_config, read_sample_metadata, read_tsv, run_cli, write_stage_config
-from sv_contract import METADATA_COLUMNS
+from sv_table import METADATA_COLUMNS
 
 
 log = logging.getLogger("stage7_hash_representation")
@@ -237,6 +237,23 @@ def cluster_purity_table(
     )
 
 
+def fill_sv_metadata(result: pd.DataFrame, source: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    """Add or complete METADATA_COLUMNS in ``result`` from ``source`` rows with the same keys."""
+    if source.empty:
+        return result
+    columns = [column for column in METADATA_COLUMNS if column not in keys]
+    merged = result.merge(
+        source.drop_duplicates(keys)[keys + columns], on=keys, how="left", suffixes=("", "_source")
+    )
+    for column in columns:
+        filled = merged.pop(f"{column}_source") if f"{column}_source" in merged else None
+        if column not in merged:
+            merged[column] = filled
+        elif filled is not None:
+            merged[column] = merged[column].where(merged[column].notna(), filled)
+    return merged
+
+
 def representation_summary(
     carrier_clusters: pd.DataFrame,
     purity: pd.DataFrame,
@@ -314,31 +331,9 @@ def representation_summary(
         result["top_supported_cluster_carrier_rate"] = np.nan
         result["top_standard_cluster_carrier_rate"] = np.nan
 
-    if not purity.empty:
-        metadata_columns = [column for column in METADATA_COLUMNS if column not in keys]
-        purity_metadata = purity.drop_duplicates(keys)[keys + metadata_columns]
-        result = result.merge(purity_metadata, on=keys, how="left", suffixes=("", "_purity"))
-        for column in metadata_columns:
-            purity_column = result.pop(f"{column}_purity") if f"{column}_purity" in result else None
-            if column not in result:
-                result[column] = purity_column
-            elif purity_column is not None:
-                result[column] = result[column].where(result[column].notna(), purity_column)
-    if not information.empty:
-        metadata_columns = [column for column in METADATA_COLUMNS if column not in keys]
-        information_metadata = information.drop_duplicates(keys)[keys + metadata_columns]
-        result = result.merge(
-            information_metadata, on=keys, how="left", suffixes=("", "_information")
-        )
-        for column in metadata_columns:
-            information_column = (
-                result.pop(f"{column}_information")
-                if f"{column}_information" in result else None
-            )
-            if column not in result:
-                result[column] = information_column
-            elif information_column is not None:
-                result[column] = result[column].where(result[column].notna(), information_column)
+    # Pairs absent from Stage 1 associations take their SV metadata from these tables.
+    for source in (purity, information):
+        result = fill_sv_metadata(result, source, keys)
     count_columns = [
         "n_supported_carrier_clusters", "n_standard_evidence_carrier_clusters",
         "n_tested_clusters", "n_mixed_clusters_meeting_count_threshold",

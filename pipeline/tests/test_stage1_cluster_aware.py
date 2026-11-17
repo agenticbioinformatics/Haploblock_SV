@@ -11,7 +11,9 @@ import yaml
 
 
 import cluster_inference
+import haploblock_clusters
 import stage1_cluster_aware
+import sv_table
 
 
 def write_test_vcf(path: Path) -> None:
@@ -175,7 +177,7 @@ def test_downloaded_cluster_files_are_reused(tmp_path: Path, monkeypatch) -> Non
     names = ["chr1_0-100_cluster.tsv", "chr1_100-200_cluster.tsv"]
     downloads = []
     monkeypatch.setattr(
-        cluster_inference,
+        haploblock_clusters,
         "discover_cluster_filenames",
         lambda base_url, chrom, retries: names,
     )
@@ -184,20 +186,20 @@ def test_downloaded_cluster_files_are_reused(tmp_path: Path, monkeypatch) -> Non
         downloads.append(url)
         return b"cluster_a\tsample_chr1_region_0-100_hap0\n"
 
-    monkeypatch.setattr(cluster_inference, "request_with_retries", download)
-    cache_dir = cluster_inference.cluster_cache_directory(
+    monkeypatch.setattr(haploblock_clusters, "request_with_retries", download)
+    cache_dir = haploblock_clusters.cluster_cache_directory(
         tmp_path, "https://example.test/source", "chr1"
     )
-    assert cache_dir == cluster_inference.cluster_cache_directory(
+    assert cache_dir == haploblock_clusters.cluster_cache_directory(
         tmp_path, "https://example.test/source/", "chr1"
     )
-    assert cache_dir != cluster_inference.cluster_cache_directory(
+    assert cache_dir != haploblock_clusters.cluster_cache_directory(
         tmp_path, "https://other.example.test/source", "chr1"
     )
-    first_paths, first_qc = cluster_inference.prepare_cluster_files(
+    first_paths, first_qc = haploblock_clusters.prepare_cluster_files(
         "chr1", "https://example.test", cache_dir, None, 2, 1
     )
-    second_paths, second_qc = cluster_inference.prepare_cluster_files(
+    second_paths, second_qc = haploblock_clusters.prepare_cluster_files(
         "chr1", "https://example.test", cache_dir, None, 2, 1
     )
 
@@ -376,7 +378,7 @@ def test_bgzipped_vcf_with_bgz_extension_and_comment_line(tmp_path: Path) -> Non
         "chr1\t301\tsv2\tN\t<INS>\t.\tPASS\tEND=302;SVTYPE=INS\tGT\t1/1",
     ])
 
-    tables = cluster_inference.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
+    tables = sv_table.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
 
     rows = read_tsv(tables["chr1"])
     assert [row["sv_id"] for row in rows] == ["sv1", "sv2"]
@@ -389,6 +391,6 @@ def test_malformed_record_fails_once_with_location(tmp_path: Path, caplog) -> No
         "chr1\t301\tsv2\tN\t<INS>\t.\tPASS\tEND=302;SVTYPE=INS\tDP\t7",
     ])
 
-    with pytest.raises(cluster_inference.VcfRecordError, match="chr1:301"):
-        cluster_inference.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
+    with pytest.raises(sv_table.VcfRecordError, match="chr1:301"):
+        sv_table.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
     assert "streaming the VCF instead" not in caplog.text

@@ -1,25 +1,19 @@
 """Stage 1 core: infer SV-to-haploblock-cluster associations chromosome by chromosome.
 
-Used by ``stage1_cluster_aware.py``; not a standalone entry point. The VCF is
-split into per-chromosome genotype tables, haploblock cluster memberships are
-read (downloaded from data.haploblocks.org or supplied locally), and each SV
-overlapping a block is tested against every cluster in that block with an EM
-model that does not assume VCF phase matches the cluster hap0/hap1 labels.
+Used by ``stage1_cluster_aware.py``; not a standalone entry point. For each
+chromosome the VCF table (``sv_table``) and the haploblock cluster memberships
+(``haploblock_clusters``) are combined, and each SV overlapping a block is
+tested against every cluster in that block with an EM model that does not
+assume VCF phase matches the cluster hap0/hap1 labels.
 """
 
 from __future__ import annotations
 
 import csv
-import gzip
-import hashlib
 import json
 import logging
 import math
 import multiprocessing
-import re
-import subprocess
-import threading
-import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -28,28 +22,21 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import pysam
 
-from sv_contract import (
-    METADATA_COLUMNS,
-    canonical_sample_id,
-    normalize_chrom,
-    parse_vcf_fields,
+from haploblock_clusters import (
+    DEFAULT_BASE_URL,
+    BlockMembership,
+    cluster_cache_directory,
+    load_block_membership,
+    prepare_cluster_files,
 )
+from sv_table import METADATA_COLUMNS, reusable_sv_tables, split_vcf_by_chromosome
 
 
 log = logging.getLogger("cluster_inference")
 
-_USE_SYSTEM_CURL = False
-_DOWNLOAD_CLIENT_LOCK = threading.Lock()
-_DOWNLOAD_SESSION = threading.local()
 
-DEFAULT_BASE_URL = "https://data.haploblocks.org/haploblock_hashes/1000G"
 ALL_CHROMS = [f"chr{number}" for number in range(1, 23)] + ["chrX"]
-CLUSTER_FILENAME_RE = re.compile(r"^(chr[^_]+)_(\d+)-(\d+)_cluster\.tsv$")
-HAPLOTYPE_RE = re.compile(
-    r"^(?P<sample>.+)_(?P<chrom>chr[^_]+)_region_(?P<start>\d+)-(?P<end>\d+)_hap(?P<haplotype>[01])$"
-)
 # Associations supported by fewer callable haplotypes than this are reported
 # with evidence_tier="low"; it is also the cap on the adaptive support rule.
 MIN_STANDARD_CALLABLE_HAPLOTYPES = 3
@@ -71,210 +58,12 @@ class InferenceSettings:
     tolerance: float = 1e-5
 
 
-class VcfRecordError(ValueError):
-    """A VCF data line could not be parsed (as opposed to the file being unindexable)."""
-
-
-def is_gzip_file(path: Path) -> bool:
-    """True for gzip/BGZF content, whatever the file extension (.gz, .bgz, ...)."""
-    with open(path, "rb") as handle:
-        return handle.read(2) == b"\x1f\x8b"
-
-
-def open_vcf_text(path: Path):
-    return gzip.open(path, "rt") if is_gzip_file(path) else open(path, "rt")
-
-
-def read_vcf_samples(path: Path) -> list[str]:
-    """Sample names from the #CHROM header line, without reading any records."""
-    with open_vcf_text(path) as handle:
-        for line in handle:
-            if line.startswith("#CHROM"):
-                return line.rstrip("\n").split("\t")[9:]
-            if not line.startswith("#"):
-                break
-    raise ValueError(f"{path} has no #CHROM header line; is it a VCF file?")
-
-
-def _canonical_sample_ids(original_samples: list[str]) -> list[str]:
-    canonical = [canonical_sample_id(sample) for sample in original_samples]
-    duplicates = sorted(sample for sample, count in Counter(canonical).items() if count > 1)
-    if duplicates:
-        raise ValueError(f"Sample-ID canonicalization creates duplicate columns: {duplicates}")
-    return canonical
-
-
-def split_vcf_by_chromosome(
-    vcf_path: Path,
-    chroms: list[str],
-    out_dir: Path,
-    max_sv_id_length: int,
-    chrom_workers: int = 1,
-) -> dict[str, Path]:
-    """Write one genotype table per chromosome, using a Tabix index when available."""
-    qc_dir = out_dir / "debug_and_qc"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    qc_dir.mkdir(parents=True, exist_ok=True)
-    selected = set(chroms)
-    paths = {chrom: out_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
-    handles: dict[str, object] = {}
-    writers: dict[str, csv.writer] = {}
-    record_counts: Counter[str] = Counter()
-    shortened_counts: Counter[str] = Counter()
-    filter_counts = {chrom: Counter() for chrom in chroms}
-    genotype_counts = {chrom: Counter() for chrom in chroms}
-    original_samples: list[str] | None = None
-    canonical_samples: list[str] | None = None
-
-    def open_writers(samples: list[str]) -> None:
-        for chrom in chroms:
-            handle = paths[chrom].open("w", newline="")
-            handles[chrom] = handle
-            writers[chrom] = csv.writer(handle, delimiter="\t", lineterminator="\n")
-            writers[chrom].writerow(METADATA_COLUMNS + samples)
-
-    def write_record(fields: list[str]) -> None:
-        try:
-            metadata, genotypes, shortened = parse_vcf_fields(
-                fields, record_counts[normalize_chrom(fields[0])] + 1, max_sv_id_length
-            )
-        except (ValueError, IndexError) as error:
-            location = ":".join(fields[:2])
-            raise VcfRecordError(f"Malformed VCF record at {location} in {vcf_path}: {error}") from error
-        chrom = metadata[2]
-        writers[chrom].writerow(metadata + genotypes)
-        record_counts[chrom] += 1
-        shortened_counts[chrom] += shortened
-        filter_counts[chrom][fields[6]] += 1
-        genotype_counts[chrom].update(genotypes)
-
-    def reset_outputs() -> None:
-        for handle in handles.values():
-            handle.close()
-        handles.clear()
-        writers.clear()
-        record_counts.clear()
-        shortened_counts.clear()
-        for chrom in chroms:
-            filter_counts[chrom].clear()
-            genotype_counts[chrom].clear()
-
-    compressed = is_gzip_file(vcf_path)
-    try:
-        try:
-            # Only compressed input is indexed: pysam would otherwise compress (and
-            # replace) an uncompressed VCF in the user's input directory.
-            if not compressed:
-                raise ValueError("VCF is not compressed")
-            if not Path(f"{vcf_path}.tbi").exists():
-                log.info("Creating a Tabix index for %s", vcf_path)
-                pysam.tabix_index(str(vcf_path), preset="vcf")
-            with pysam.VariantFile(str(vcf_path)) as source:
-                original_samples = list(source.header.samples)
-            canonical_samples = _canonical_sample_ids(original_samples)
-            open_writers(canonical_samples)
-
-            def extract_chromosome(requested_chrom: str) -> None:
-                with pysam.VariantFile(str(vcf_path)) as indexed_source:
-                    for record in indexed_source.fetch(requested_chrom):
-                        write_record(str(record).rstrip("\n").split("\t"))
-
-            with ThreadPoolExecutor(max_workers=min(chrom_workers, len(chroms))) as executor:
-                for future in [executor.submit(extract_chromosome, chrom) for chrom in chroms]:
-                    future.result()
-        except VcfRecordError:
-            raise
-        except (OSError, ValueError) as error:
-            # Unindexable input (plain gzip, uncompressed, contig naming mismatch):
-            # fall back to one sequential pass over the file.
-            (log.warning if compressed else log.info)(
-                "Indexed VCF access unavailable (%s); streaming the VCF instead", error
-            )
-            reset_outputs()
-            with open_vcf_text(vcf_path) as source:
-                for line in source:
-                    if line.startswith("##"):
-                        continue
-                    if line.startswith("#CHROM"):
-                        original_samples = line.rstrip("\n").split("\t")[9:]
-                        canonical_samples = _canonical_sample_ids(original_samples)
-                        open_writers(canonical_samples)
-                        continue
-                    if line.startswith("#"):
-                        continue
-                    if canonical_samples is None:
-                        raise ValueError(f"{vcf_path} has no #CHROM header line")
-                    fields = line.rstrip("\n").split("\t")
-                    if normalize_chrom(fields[0]) in selected:
-                        write_record(fields)
-    finally:
-        for handle in handles.values():
-            handle.close()
-
-    if original_samples is None or canonical_samples is None:
-        raise ValueError(f"{vcf_path} has no #CHROM header line")
-    with (out_dir / "samples.tsv").open("w", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["sample_id", "original_sample_id"])
-        writer.writerows(zip(canonical_samples, original_samples))
-    for chrom in chroms:
-        qc = {
-            "vcf": str(vcf_path.resolve()),
-            "chrom": chrom,
-            "records_written": record_counts[chrom],
-            "sv_id_max_length": max_sv_id_length,
-            "sv_ids_shortened": shortened_counts[chrom],
-            "samples": len(canonical_samples),
-            "sample_ids_changed": sum(a != b for a, b in zip(original_samples, canonical_samples)),
-            "filter_counts": dict(sorted(filter_counts[chrom].items())),
-            "genotype_counts": dict(sorted(genotype_counts[chrom].items())),
-        }
-        (qc_dir / f"vcf_qc.{chrom}.json").write_text(json.dumps(qc, indent=2) + "\n")
-        log.info("Extracted %d records for %s", record_counts[chrom], chrom)
-        if record_counts[chrom] == 0:
-            log.warning("No VCF records found for %s; check chromosome naming in --chroms", chrom)
-    return paths
-
-
-def reusable_sv_tables(
-    vcf_path: Path,
-    chroms: list[str],
-    out_dir: Path,
-    max_sv_id_length: int,
-) -> dict[str, Path] | None:
-    """Return a complete interrupted-run VCF split when its QC matches this invocation."""
-    qc_dir = out_dir / "debug_and_qc"
-    tables = {chrom: out_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
-    if not (out_dir / "samples.tsv").exists():
-        return None
-    expected_vcf = str(vcf_path.resolve())
-    for chrom, table in tables.items():
-        qc_path = qc_dir / f"vcf_qc.{chrom}.json"
-        if not table.exists() or not qc_path.exists():
-            return None
-        qc = json.loads(qc_path.read_text())
-        if qc.get("vcf") != expected_vcf or qc.get("sv_id_max_length") != max_sv_id_length:
-            return None
-    log.info("Reusing the completed chromosome-specific VCF split from an interrupted run")
-    return tables
-
-
 @dataclass
 class SVRecord:
     metadata: list[str]
     start: int
     end: int
     dosages: np.ndarray
-
-
-@dataclass
-class BlockMembership:
-    haploblock_id: str
-    chrom: str
-    start: int
-    end: int
-    sample_clusters: dict[str, tuple[str, str]]
-    total_cluster_haplotypes: Counter[str]
 
 
 @dataclass
@@ -285,136 +74,6 @@ class PreparedBlock:
     cluster0: np.ndarray
     cluster1: np.ndarray
     represented_counts: np.ndarray
-
-
-def download_with_system_curl(url: str, timeout: int) -> bytes:
-    """Download with the OS HTTPS client, which trusts the macOS keychain."""
-    result = subprocess.run(
-        ["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", str(timeout), url],
-        check=True,
-        capture_output=True,
-    )
-    return result.stdout
-
-
-def request_with_retries(url: str, retries: int, timeout: int = 60) -> bytes:
-    import requests
-
-    global _USE_SYSTEM_CURL
-    error: Exception | None = None
-    for attempt in range(retries):
-        try:
-            with _DOWNLOAD_CLIENT_LOCK:
-                use_system_curl = _USE_SYSTEM_CURL
-            if use_system_curl:
-                return download_with_system_curl(url, timeout)
-            session = getattr(_DOWNLOAD_SESSION, "session", None)
-            if session is None:
-                session = requests.Session()
-                _DOWNLOAD_SESSION.session = session
-            response = session.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response.content
-        except requests.RequestException:
-            with _DOWNLOAD_CLIENT_LOCK:
-                if not _USE_SYSTEM_CURL:
-                    log.warning(
-                        "Python's HTTPS client could not reach the server; using the system HTTPS client instead"
-                    )
-                    _USE_SYSTEM_CURL = True
-            try:
-                return download_with_system_curl(url, timeout)
-            except subprocess.CalledProcessError as exc:
-                error = exc
-        except subprocess.CalledProcessError as exc:
-            error = exc
-        if attempt + 1 < retries:
-            time.sleep(2 ** attempt)
-    raise RuntimeError(f"Failed to download {url} after {retries} attempts: {error}")
-
-
-def discover_cluster_filenames(base_url: str, chrom: str, retries: int) -> list[str]:
-    directory_url = f"{base_url.rstrip('/')}/{chrom}/clusters/"
-    log.info("Discovering cluster files for %s", chrom)
-    html = request_with_retries(directory_url, retries).decode()
-    pattern = re.compile(rf"{re.escape(chrom)}_\d+-\d+_cluster\.tsv")
-    names = sorted(set(pattern.findall(html)), key=parse_cluster_filename)
-    if not names:
-        raise RuntimeError(f"No cluster files found at {directory_url}")
-    return names
-
-
-def parse_cluster_filename(path_or_name: str | Path) -> tuple[str, int, int]:
-    name = Path(path_or_name).name
-    match = CLUSTER_FILENAME_RE.fullmatch(name)
-    if not match:
-        raise ValueError(f"Unexpected cluster filename: {name}")
-    return match.group(1), int(match.group(2)), int(match.group(3))
-
-
-def cluster_cache_directory(out_dir: Path, base_url: str, chrom: str) -> Path:
-    normalized_url = base_url.rstrip("/")
-    source_id = hashlib.sha256(normalized_url.encode()).hexdigest()[:16]
-    return out_dir / "_intermediate" / "clusters" / source_id / chrom
-
-
-def prepare_cluster_files(
-    chrom: str,
-    base_url: str,
-    cache_dir: Path,
-    cluster_dir: Path | None,
-    workers: int,
-    retries: int,
-) -> tuple[list[Path], dict]:
-    if cluster_dir is not None:
-        paths = sorted(cluster_dir.glob(f"{chrom}_*-*_cluster.tsv"), key=parse_cluster_filename)
-        if not paths:
-            raise ValueError(f"No {chrom} cluster files found in {cluster_dir}")
-        return paths, {
-            "source": "local",
-            "directory": str(cluster_dir.resolve()),
-            "discovered": len(paths),
-            "downloaded": 0,
-            "reused": len(paths),
-        }
-
-    names = discover_cluster_filenames(base_url, chrom, retries)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    reused = [cache_dir / name for name in names if (cache_dir / name).exists()]
-    pending = [name for name in names if not (cache_dir / name).exists()]
-    failures: list[str] = []
-    log.info("Preparing %d cluster files (%d cached, %d to download)", len(names), len(reused), len(pending))
-
-    def download(name: str) -> Path:
-        url = f"{base_url.rstrip('/')}/{chrom}/clusters/{name}"
-        destination = cache_dir / name
-        temporary = destination.with_suffix(destination.suffix + ".tmp")
-        temporary.write_bytes(request_with_retries(url, retries))
-        temporary.replace(destination)
-        return destination
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(download, name): name for name in pending}
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as exc:  # individual failures are collected and reported together
-                name = futures[future]
-                log.error("Failed to download %s: %s", name, exc)
-                failures.append(name)
-    if failures:
-        raise RuntimeError(
-            f"Failed to download {len(failures)} cluster file(s); rerun to resume: {sorted(failures)}"
-        )
-    paths = sorted((cache_dir / name for name in names), key=parse_cluster_filename)
-    return paths, {
-        "source": "download",
-        "base_url": base_url.rstrip("/"),
-        "cache_dir": str(cache_dir.resolve()),
-        "discovered": len(names),
-        "downloaded": len(pending),
-        "reused": len(reused),
-    }
 
 
 def load_sv_table(path: Path) -> tuple[list[str], list[SVRecord]]:
@@ -441,63 +100,6 @@ def load_sv_table(path: Path) -> tuple[list[str], list[SVRecord]]:
                 )
             )
     return samples, records
-
-
-def parse_haplotype_id(value: str) -> tuple[str, str, int, int, int]:
-    match = HAPLOTYPE_RE.fullmatch(value)
-    if not match:
-        raise ValueError(f"Unexpected haplotype identifier: {value}")
-    return (
-        canonical_sample_id(match.group("sample")),
-        match.group("chrom"),
-        int(match.group("start")),
-        int(match.group("end")),
-        int(match.group("haplotype")),
-    )
-
-
-def load_block_membership(
-    path: Path,
-    vcf_samples: set[str],
-) -> tuple[BlockMembership, int, int]:
-    chrom, start, end = parse_cluster_filename(path)
-    haploblock_id = f"{chrom}_{start}_{end}"
-    total_counts: Counter[str] = Counter()
-    by_sample: dict[str, list[str | None]] = {}
-    total_rows = 0
-    used_rows = 0
-
-    with path.open() as handle:
-        for line in handle:
-            cluster_id, member_id = line.rstrip("\n").split("\t")
-            sample, member_chrom, member_start, member_end, haplotype = parse_haplotype_id(member_id)
-            if (member_chrom, member_start, member_end) != (chrom, start, end):
-                raise ValueError(f"Membership coordinates do not match filename in {path}: {member_id}")
-            total_rows += 1
-            total_counts[cluster_id] += 1
-            if sample not in vcf_samples:
-                continue
-            used_rows += 1
-            clusters = by_sample.setdefault(sample, [None, None])
-            clusters[haplotype] = cluster_id
-
-    complete_samples = {
-        sample: (clusters[0], clusters[1])
-        for sample, clusters in by_sample.items()
-        if clusters[0] is not None and clusters[1] is not None
-    }
-    return (
-        BlockMembership(
-            haploblock_id=haploblock_id,
-            chrom=chrom,
-            start=start,
-            end=end,
-            sample_clusters=complete_samples,
-            total_cluster_haplotypes=total_counts,
-        ),
-        total_rows,
-        used_rows,
-    )
 
 
 @cache
@@ -590,6 +192,10 @@ def fraction_bin_counts(values: np.ndarray) -> np.ndarray:
         ],
         dtype=np.int64,
     )
+
+
+def nonzero_counts(names: list[str], counts: np.ndarray) -> dict[str, int]:
+    return {name: int(count) for name, count in zip(names, counts) if count}
 
 
 def prepare_block(block: BlockMembership, sample_index: dict[str, int]) -> PreparedBlock:
@@ -964,26 +570,14 @@ def write_results(
         "cluster_evaluations": cluster_evaluations,
         "associated_cluster_rows": associated_cluster_rows,
         "low_evidence_associations": low_evidence_associations,
-        "cluster_probability_bins": {
-            name: int(count)
-            for name, count in zip(FRACTION_BIN_NAMES, probability_bin_counts)
-            if count
-        },
-        "cluster_call_rate_bins": {
-            name: int(count)
-            for name, count in zip(FRACTION_BIN_NAMES, call_rate_bin_counts)
-            if count
-        },
-        "heterozygote_assignment_status_counts": {
-            name: int(count)
-            for name, count in zip(["same_cluster", "assigned", "ambiguous"], assignment_status_counts)
-            if count
-        },
-        "heterozygote_assignment_confidence_bins": {
-            name: int(count)
-            for name, count in zip(FRACTION_BIN_NAMES, assignment_confidence_bin_counts)
-            if count
-        },
+        "cluster_probability_bins": nonzero_counts(FRACTION_BIN_NAMES, probability_bin_counts),
+        "cluster_call_rate_bins": nonzero_counts(FRACTION_BIN_NAMES, call_rate_bin_counts),
+        "heterozygote_assignment_status_counts": nonzero_counts(
+            ["same_cluster", "assigned", "ambiguous"], assignment_status_counts
+        ),
+        "heterozygote_assignment_confidence_bins": nonzero_counts(
+            FRACTION_BIN_NAMES, assignment_confidence_bin_counts
+        ),
         "association_class_counts": dict(association_counts),
         "multiple_cluster_fraction": association_counts["multiple"] / analyzable_pairs if analyzable_pairs else None,
         "association_threshold": association_threshold,

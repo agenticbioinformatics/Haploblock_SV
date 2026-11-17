@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from stage_io import load_config, read_tsv, run_cli, write_stage_config
-from sv_contract import METADATA_COLUMNS, normalize_chrom
+from sv_table import METADATA_COLUMNS, normalize_chrom
 
 
 log = logging.getLogger("stage8_candidate_annotation")

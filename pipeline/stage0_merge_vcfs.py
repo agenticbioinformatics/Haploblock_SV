@@ -108,31 +108,22 @@ def require_indexed_reference(reference: Path) -> None:
         )
 
 
-def run_command(command: list[str]) -> None:
+def run_command(command: list[str], capture: bool = False) -> str:
+    """Run an external tool; return its stdout if ``capture``, else let it print (progress)."""
     log.info("Running: %s", " ".join(command))
     try:
-        subprocess.run(command, check=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"Required executable was not found: {command[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Command failed with exit code {exc.returncode}: {command[0]}") from exc
-
-
-def capture_command(command: list[str]) -> str:
-    log.info("Running: %s", " ".join(command))
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = subprocess.run(command, check=True, capture_output=capture, text=True)
     except FileNotFoundError as exc:
         raise RuntimeError(f"Required executable was not found: {command[0]}") from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             f"Command failed with exit code {exc.returncode}: {command[0]}\n{exc.stderr}"
         ) from exc
-    return result.stdout
+    return result.stdout or ""
 
 
 def get_sample_name(vcf: Path, bcftools: str) -> str:
-    names = [n for n in capture_command([bcftools, "query", "-l", str(vcf)]).splitlines() if n]
+    names = [n for n in run_command([bcftools, "query", "-l", str(vcf)], capture=True).splitlines() if n]
     if len(names) != 1:
         raise ValueError(f"Expected exactly one sample column in {vcf}, found {len(names)}: {names}")
     return names[0]
@@ -165,7 +156,7 @@ def check_sample_names(vcfs: list[Path], bcftools: str) -> list[str]:
 
 def read_contig_lengths(vcf: Path, bcftools: str) -> dict[str, int]:
     """Parse ##contig=<ID=...,length=...> lines out of a VCF header."""
-    header = capture_command([bcftools, "view", "-h", str(vcf)])
+    header = run_command([bcftools, "view", "-h", str(vcf)], capture=True)
     lengths: dict[str, int] = {}
     for line in header.splitlines():
         if not line.startswith("##contig="):
@@ -361,7 +352,7 @@ def merge_vcfs(
     removed_raw.unlink()
 
     for label, path in [("merged (pre-collapse)", merged), ("collapsed (kept)", collapsed), ("removed (collapsed-away)", removed)]:
-        count = capture_command([bcftools, "index", "-n", str(path)]).strip()
+        count = run_command([bcftools, "index", "-n", str(path)], capture=True).strip()
         log.info("%s: %s records -> %s", label, count, path)
 
     return {

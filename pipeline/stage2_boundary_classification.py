@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from stage_io import DEFAULT_BOUNDARY_DISTANCE_BP, load_config, read_tsv, run_cli
-from sv_contract import METADATA_COLUMNS
+from sv_table import METADATA_COLUMNS
 
 
 log = logging.getLogger("stage2_boundary_classification")

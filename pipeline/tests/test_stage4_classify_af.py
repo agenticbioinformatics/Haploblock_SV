@@ -110,3 +110,36 @@ def test_genotype_counts_treat_multidigit_alleles_as_one_allele() -> None:
 
     assert alternate.tolist() == [1, 2, 0]
     assert called.tolist() == [2, 2, 0]
+
+
+def test_haploblock_summary_counts_each_sv_once_and_lists_populations(tmp_path: Path) -> None:
+    rows = pd.DataFrame([
+        # SV overlapping two blocks, and a duplicated row for the same SV-block pair.
+        {"sv_record_id": "r1", "sv_class": "population_specific", "specific_to_population": "PEL",
+         "haploblock_id": "b1", "block_start": 0, "block_end": 10},
+        {"sv_record_id": "r1", "sv_class": "population_specific", "specific_to_population": "PEL",
+         "haploblock_id": "b1", "block_start": 0, "block_end": 10},
+        {"sv_record_id": "r1", "sv_class": "population_specific", "specific_to_population": "PEL",
+         "haploblock_id": "b2", "block_start": 10, "block_end": 20},
+        {"sv_record_id": "r2", "sv_class": "common", "specific_to_population": "",
+         "haploblock_id": "b1", "block_start": 0, "block_end": 10},
+        {"sv_record_id": "r3", "sv_class": "other", "specific_to_population": "",
+         "haploblock_id": None, "block_start": None, "block_end": None},
+    ])
+
+    stage4_classify_af.write_informative_summary(rows, tmp_path)
+
+    blocks = pd.read_csv(
+        tmp_path / "haploblock_population_specific_summary.tsv", sep="\t", keep_default_na=False
+    ).set_index("haploblock_id")
+    assert blocks.loc["b1", "total_svs"] == 2
+    assert blocks.loc["b1", "common_svs"] == 1
+    assert blocks.loc["b1", "population_specific_svs"] == 1
+    assert blocks.loc["b1", "populations_with_specific_svs"] == "PEL"
+    overall = pd.read_csv(tmp_path / "stage4_summary.tsv", sep="\t").iloc[0]
+    assert overall["total_unique_svs"] == 3
+    assert overall["svs_outside_haploblocks"] == 1
+    populations = pd.read_csv(tmp_path / "population_specific_summary.tsv", sep="\t")
+    assert populations.to_dict("records") == [
+        {"population": "PEL", "population_specific_svs": 1, "haploblocks": 2}
+    ]

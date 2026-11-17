@@ -19,7 +19,7 @@ import pandas as pd
 
 from genotypes import benjamini_hochberg, dosage_matrix_from_genotypes, genotype_samples
 from stage_io import load_config, read_sample_metadata, read_tsv, run_cli, write_stage_config
-from sv_contract import METADATA_COLUMNS
+from sv_table import METADATA_COLUMNS
 
 
 log = logging.getLogger("stage6_cluster_association")
