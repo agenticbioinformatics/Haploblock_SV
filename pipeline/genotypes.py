@@ -28,10 +28,9 @@ def genotype_counts(genotype: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     (e.g. ``12/0``) count as one allele each.
     """
     if pd.api.types.is_numeric_dtype(genotype):
-        dosage = pd.to_numeric(genotype, errors="coerce")
-        has_call = dosage.notna()
-        return dosage.where(has_call, 0).astype(int).to_numpy(), (has_call.astype(int) * 2).to_numpy()
-
+        # pandas reads a GT column holding only haploid calls (0/1) as numbers;
+        # treat them as the GT strings they are so allele counts don't depend on dtype.
+        genotype = genotype.astype("Int64")
     genotype = genotype.astype("string").str.strip()
     missing = genotype.str.contains(".", regex=False, na=True)
     alternate = genotype.str.count(r"(?:^|[|/])[1-9][0-9]*(?=$|[|/])")
@@ -87,12 +86,17 @@ def genotype_samples(sv: pd.DataFrame, metadata: pd.DataFrame) -> list[str]:
 def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     """Benjamini-Hochberg adjusted q-values, in the input order."""
     p_values = np.asarray(p_values, dtype=float)
-    if p_values.size == 0:
-        return p_values.copy()
-    order = np.argsort(p_values)
-    ranked = p_values[order]
+    result = np.full_like(p_values, np.nan)
+    finite = np.isfinite(p_values)
+    if not finite.any():
+        return result
+    # Missing p-values are untested hypotheses: they get NaN and don't count towards n.
+    tested = p_values[finite]
+    order = np.argsort(tested)
+    ranked = tested[order]
     adjusted = ranked * len(ranked) / np.arange(1, len(ranked) + 1)
     adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
-    result = np.empty_like(adjusted)
-    result[order] = np.minimum(adjusted, 1.0)
+    finite_result = np.empty_like(adjusted)
+    finite_result[order] = np.minimum(adjusted, 1.0)
+    result[finite] = finite_result
     return result

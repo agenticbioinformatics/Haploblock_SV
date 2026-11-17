@@ -50,10 +50,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out-dir", type=Path, default=Path("stage9_output"))
     parser.add_argument(
-        "--agent", choices=("auto", "required", "off"), default="auto",
+        "--agent", choices=("auto", "required", "off"), default="off",
         help=(
             "auto uses the agent when OPENAI_API_KEY is set; required fails without "
-            "a key; off writes only the deterministic report"
+            "a key; off (the default) writes only the deterministic report and sends "
+            "nothing to OpenAI"
         ),
     )
     parser.add_argument("--model", default="gpt-5.6", help="OpenAI model for the optional interpretation")
@@ -359,7 +360,10 @@ def factual_markdown(facts: dict[str, object], figures: list[str]) -> str:
 def write_html(markdown_text: str, path: Path) -> None:
     import mistune
 
-    body = mistune.html(markdown_text)
+    # escape=True: the agent interpretation is untrusted text, never raw HTML.
+    body = mistune.create_markdown(
+        escape=True, plugins=["strikethrough", "footnotes", "table", "speedup"]
+    )(markdown_text)
     path.write_text(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Stage 5-8 biological report</title>
@@ -371,7 +375,7 @@ li{{margin:.35rem 0}}</style></head><body>{body}</body></html>\n""")
 def run_report(
     config_paths: list[Path],
     out_dir: Path,
-    agent_mode: str = "auto",
+    agent_mode: str = "off",
     model: str = "gpt-5.6",
     top_candidates: int = 10,
     q_threshold: float = 0.05,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -39,12 +40,21 @@ METADATA_COLUMN_NAMES = {
 }
 
 
+CHROM_NAME_RE = re.compile(r"chr[A-Za-z0-9_]+")
+
+
 def parse_chroms(value: str) -> list[str]:
     if value.strip().lower() == "all":
         return ALL_CHROMS
-    chroms = [normalize_chrom(chrom.strip()) for chrom in value.split(",") if chrom.strip()]
+    chroms = list(dict.fromkeys(
+        normalize_chrom(chrom.strip()) for chrom in value.split(",") if chrom.strip()
+    ))
     if not chroms:
         raise ValueError("--chroms selected no chromosomes")
+    invalid = [chrom for chrom in chroms if not CHROM_NAME_RE.fullmatch(chrom)]
+    if invalid:
+        # Chromosome names become file names, cache directories and URLs.
+        raise ValueError(f"Invalid chromosome names in --chroms: {invalid}")
     return chroms
 
 

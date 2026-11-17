@@ -313,7 +313,11 @@ def test_completed_chromosome_must_match_cluster_source(tmp_path: Path) -> None:
     ]:
         path.touch()
     (qc_dir / "vcf_qc.chr1.json").write_text(
-        json.dumps({"vcf": str(vcf_path.resolve()), "sv_id_max_length": 80})
+        json.dumps({
+            "vcf": str(vcf_path.resolve()),
+            "vcf_fingerprint": sv_table.vcf_fingerprint(vcf_path),
+            "sv_id_max_length": 80,
+        })
     )
     (qc_dir / "method_qc.chr1.json").write_text(
         json.dumps(

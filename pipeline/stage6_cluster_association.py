@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -425,6 +426,11 @@ def association_rows_for_block(
     return output
 
 
+def block_seed(seed: int, block_id: str) -> int:
+    """Per-block permutation seed, distinct across chromosomes and stable across runs."""
+    return int(np.random.SeedSequence([seed, zlib.crc32(block_id.encode())]).generate_state(1)[0])
+
+
 def association_table(
     sv: pd.DataFrame,
     sv_blocks: pd.DataFrame,
@@ -463,19 +469,19 @@ def association_table(
     if not block_groups:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS)
 
-    def test_block(index_and_group: tuple[int, tuple[str, pd.DataFrame]]) -> list[dict]:
-        index, (block_id, block_variants) = index_and_group
+    def test_block(block_group: tuple[str, pd.DataFrame]) -> list[dict]:
+        block_id, block_variants = block_group
         return association_rows_for_block(
             block_id, block_variants,
             memberships_by_block.get(block_id, memberships.iloc[0:0]),
             sv, dosage_matrix, record_positions, sample_positions, population_by_sample,
-            permutations, seed + index, min_cluster_haplotypes, min_population_samples,
+            permutations, block_seed(seed, block_id), min_cluster_haplotypes, min_population_samples,
             refinement_permutations, refinement_p_threshold,
             initial_permutations, initial_p_threshold, min_refinement_abs_r,
         )
 
     with ThreadPoolExecutor(max_workers=min(threads, len(block_groups))) as executor:
-        block_tables = list(executor.map(test_block, enumerate(block_groups)))
+        block_tables = list(executor.map(test_block, block_groups))
     block_tables = [table for table in block_tables if not table.empty]
 
     if not block_tables:

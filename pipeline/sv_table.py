@@ -59,6 +59,20 @@ def parse_length(info: dict[str, str | bool], start: int, end: int) -> str:
     return str(interval_length) if interval_length > 0 else ""
 
 
+SPANNING_SV_TYPES = {"DEL", "DUP", "INV", "CNV"}
+
+
+def span_from_svlen(info: dict[str, str | bool]) -> int:
+    """Reference span implied by SVLEN (0 when SVLEN is absent or unparsable)."""
+    value = info.get("SVLEN")
+    if isinstance(value, str) and value not in {"", "."}:
+        try:
+            return abs(int(value.split(",")[0]))
+        except ValueError:
+            pass
+    return 0
+
+
 def simplify_sv_id(sv_id: str, chrom: str, start: int, end: int, sv_type: str, max_length: int = 80) -> str:
     if len(sv_id) <= max_length:
         return sv_id
@@ -81,9 +95,17 @@ def parse_vcf_fields(
     pos = int(fields[1])
     info = parse_info(fields[7])
     start = pos - 1
-    end_value = info.get("END")
-    end = int(end_value) if isinstance(end_value, str) and end_value != "." else pos
     sv_type = str(info.get("SVTYPE", "MISSING"))
+    end_value = info.get("END")
+    if sv_type == "BND":
+        # A breakend's END (if any) is not an interval end on this contig.
+        end = pos
+    elif isinstance(end_value, str) and end_value != ".":
+        end = int(end_value)
+    else:
+        end = pos + span_from_svlen(info) if sv_type in SPANNING_SV_TYPES else pos
+    if end < start:
+        raise ValueError(f"INFO/END={end} lies before POS={pos} for SVTYPE={sv_type}")
     source_sv_id = fields[2] if fields[2] != "." else f"{chrom}:{pos}:{sv_type}:{record_number}"
     sv_id = simplify_sv_id(source_sv_id, chrom, start, end, sv_type, max_sv_id_length)
     metadata = [
@@ -141,6 +163,7 @@ def split_vcf_by_chromosome(
     chrom_workers: int = 1,
 ) -> dict[str, Path]:
     """Write one genotype table per chromosome, using a Tabix index when available."""
+    chroms = list(dict.fromkeys(chroms))
     qc_dir = out_dir / "debug_and_qc"
     out_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -195,16 +218,21 @@ def split_vcf_by_chromosome(
             # replace) an uncompressed VCF in the user's input directory.
             if not compressed:
                 raise ValueError("VCF is not compressed")
-            if not Path(f"{vcf_path}.tbi").exists():
-                log.info("Creating a Tabix index for %s", vcf_path)
-                pysam.tabix_index(str(vcf_path), preset="vcf")
-            with pysam.VariantFile(str(vcf_path)) as source:
+            index_path = Path(f"{vcf_path}.tbi")
+            if not index_path.exists():
+                # Never write into the user's input directory.
+                index_path = out_dir / "_intermediate" / f"{vcf_path.name}.tbi"
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                if not index_path.exists() or index_path.stat().st_mtime < vcf_path.stat().st_mtime:
+                    log.info("Creating a Tabix index for %s in %s", vcf_path, index_path.parent)
+                    pysam.tabix_index(str(vcf_path), preset="vcf", index=str(index_path), force=True)
+            with pysam.VariantFile(str(vcf_path), index_filename=str(index_path)) as source:
                 original_samples = list(source.header.samples)
             canonical_samples = _canonical_sample_ids(original_samples)
             open_writers(canonical_samples)
 
             def extract_chromosome(requested_chrom: str) -> None:
-                with pysam.VariantFile(str(vcf_path)) as indexed_source:
+                with pysam.VariantFile(str(vcf_path), index_filename=str(index_path)) as indexed_source:
                     for record in indexed_source.fetch(requested_chrom):
                         write_record(str(record).rstrip("\n").split("\t"))
 
@@ -249,6 +277,7 @@ def split_vcf_by_chromosome(
     for chrom in chroms:
         qc = {
             "vcf": str(vcf_path.resolve()),
+            "vcf_fingerprint": vcf_fingerprint(vcf_path),
             "chrom": chrom,
             "records_written": record_counts[chrom],
             "sv_id_max_length": max_sv_id_length,
@@ -263,6 +292,12 @@ def split_vcf_by_chromosome(
         if record_counts[chrom] == 0:
             log.warning("No VCF records found for %s; check chromosome naming in --chroms", chrom)
     return paths
+
+
+def vcf_fingerprint(vcf_path: Path) -> dict[str, int]:
+    """Size and modification time, so a VCF replaced at the same path is not reused."""
+    stat = vcf_path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
 def reusable_sv_tables(
@@ -282,7 +317,11 @@ def reusable_sv_tables(
         if not table.exists() or not qc_path.exists():
             return None
         qc = json.loads(qc_path.read_text())
-        if qc.get("vcf") != expected_vcf or qc.get("sv_id_max_length") != max_sv_id_length:
+        if (
+            qc.get("vcf") != expected_vcf
+            or qc.get("vcf_fingerprint") != vcf_fingerprint(vcf_path)
+            or qc.get("sv_id_max_length") != max_sv_id_length
+        ):
             return None
     log.info("Reusing the completed chromosome-specific VCF split from an interrupted run")
     return tables

@@ -44,8 +44,10 @@ class BlockMembership:
 
 def download_with_system_curl(url: str, timeout: int) -> bytes:
     """Download with the OS HTTPS client, which trusts the macOS keychain."""
+    if not url.startswith(("https://", "http://")):
+        raise ValueError(f"Refusing to download a non-HTTP(S) URL: {url}")
     result = subprocess.run(
-        ["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", str(timeout), url],
+        ["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", str(timeout), "--", url],
         check=True,
         capture_output=True,
     )
@@ -197,8 +199,15 @@ def load_block_membership(
     used_rows = 0
 
     with path.open() as handle:
-        for line in handle:
-            cluster_id, member_id = line.rstrip("\n").split("\t")
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) != 2:
+                raise ValueError(
+                    f"{path}:{line_number}: expected 2 tab-separated columns, found {len(fields)}"
+                )
+            cluster_id, member_id = fields
             sample, member_chrom, member_start, member_end, haplotype = parse_haplotype_id(member_id)
             if (member_chrom, member_start, member_end) != (chrom, start, end):
                 raise ValueError(f"Membership coordinates do not match filename in {path}: {member_id}")
@@ -208,6 +217,11 @@ def load_block_membership(
                 continue
             used_rows += 1
             clusters = by_sample.setdefault(sample, [None, None])
+            if clusters[haplotype] not in (None, cluster_id):
+                raise ValueError(
+                    f"{path}:{line_number}: {member_id} is assigned to both "
+                    f"{clusters[haplotype]} and {cluster_id}"
+                )
             clusters[haplotype] = cluster_id
 
     complete_samples = {

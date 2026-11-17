@@ -92,7 +92,7 @@ python pipeline/stage7_hash_representation.py --config stage6_output/config.yaml
 python pipeline/stage8_candidate_annotation.py --config stage7_output/config.yaml --out-dir stage8_output
 ```
 
-**Stage 9 — report (optional).** Summarizes Stages 5–8 into `report.md`/`report.html` with figures; with `--agent auto` and `OPENAI_API_KEY` set, it also adds a plain-language interpretation generated from the compact `report_facts.json` only.
+**Stage 9 — report (optional).** Summarizes Stages 5–8 into `report.md`/`report.html` with figures; only when you opt in with `--agent auto` (and `OPENAI_API_KEY` is set) or `--agent required` does it send anything to OpenAI, adding a plain-language interpretation generated from the compact `report_facts.json` only.
 
 ```bash
 python pipeline/stage9_report.py --config stage5_output/config.yaml --config stage8_output/config.yaml \

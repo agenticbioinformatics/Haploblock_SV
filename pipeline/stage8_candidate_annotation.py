@@ -8,7 +8,6 @@ labels separate from association, representation, and call-quality evidence.
 from __future__ import annotations
 
 import argparse
-import gzip
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from stage_io import load_config, read_tsv, run_cli, write_stage_config
-from sv_table import METADATA_COLUMNS, normalize_chrom
+from sv_table import METADATA_COLUMNS, normalize_chrom, open_vcf_text
 
 
 log = logging.getLogger("stage8_candidate_annotation")
@@ -37,8 +36,7 @@ def read_gtf(path: Path) -> pd.DataFrame:
     if not path.is_file():
         raise FileNotFoundError(f"GTF annotation not found: {path}")
     rows = []
-    opener = gzip.open if path.suffix == ".gz" else open
-    with opener(path, "rt") as handle:
+    with open_vcf_text(path) as handle:  # detects gzip by content, not extension
         for line in handle:
             if line.startswith("#"):
                 continue

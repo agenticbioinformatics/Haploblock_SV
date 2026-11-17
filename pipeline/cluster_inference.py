@@ -30,7 +30,7 @@ from haploblock_clusters import (
     load_block_membership,
     prepare_cluster_files,
 )
-from sv_table import METADATA_COLUMNS, reusable_sv_tables, split_vcf_by_chromosome
+from sv_table import METADATA_COLUMNS, reusable_sv_tables, split_vcf_by_chromosome, vcf_fingerprint
 
 
 log = logging.getLogger("cluster_inference")
@@ -673,6 +673,7 @@ def chromosome_is_complete(
         )
     return (
         vcf_qc.get("vcf") == str(vcf_path.resolve())
+        and vcf_qc.get("vcf_fingerprint") == vcf_fingerprint(vcf_path)
         and vcf_qc.get("sv_id_max_length") == max_sv_id_length
         and cluster_source_matches
         and method_qc.get("association_threshold") == association_threshold
