@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from stage_io import load_config, read_tsv, run_cli
+from stage_io import DEFAULT_BOUNDARY_DISTANCE_BP, load_config, read_tsv, run_cli
 from sv_contract import METADATA_COLUMNS
 
 
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
     boundary_bp = (
         args.boundary_distance_bp
         if args.boundary_distance_bp is not None
-        else config.get("thresholds", {}).get("boundary_distance_bp", 5000)
+        else config.get("thresholds", {}).get("boundary_distance_bp", DEFAULT_BOUNDARY_DISTANCE_BP)
     )
     if boundary_bp < 0:
         raise ValueError("--boundary-distance-bp must be non-negative")

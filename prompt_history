@@ -161,3 +161,61 @@ Changes:
   Created branch post-hackathon-cleanup from main and committed all
   changes from Prompt 1 (including this prompt_history file) in a single
   commit with the requested message. Nothing was pushed.
+
+Prompt 3 - Apply the /code-review findings
+------------------------------------------
+Request:
+  "once the code-review subagent is done, analyze the review and apply the
+  suggestions to the code according to the review. summarize the changes
+  and do not commit."
+  (Prompt 2b, between these: "git checkout main && git merge
+  post-hackathon-cleanup" - fast-forwarded main to the clean-up commit;
+  not pushed.)
+
+All 10 review findings were checked against the code and addressed:
+  1. stage6_cluster_association.py: new SUMMARY_COLUMNS derived from
+     ASSOCIATION_COLUMNS; the empty summary now has the same columns as a
+     non-empty one (incl. p_value, permutations_used), so Stage 9 no longer
+     fails when no SV-block pair is testable.
+  2. cluster_inference.py: new VcfRecordError. Record-level parse errors fail
+     immediately with "<chrom>:<pos>" instead of being mistaken for "index
+     unavailable" and re-streaming the whole VCF. Real index failures on
+     compressed input are logged at WARNING again (INFO for plain text).
+  3. cluster_inference.py: streaming path skips any "#" line after #CHROM
+     explicitly (defensive; such lines were already skipped by accident).
+  4. cluster_inference.py: compression detected from gzip magic bytes
+     (is_gzip_file/open_vcf_text) instead of the ".gz" suffix, so .vcf.bgz
+     input works again.
+  5. stage9_report.py: required-column checks now list every column
+     build_facts uses (enrichment: haploblock_id, sv_type, p_value, flagged;
+     PCA variance: component, explained_variance_ratio, n_variants).
+  6. stage1_cluster_aware.py: check_metadata_matches_vcf() compares the VCF
+     header samples (cluster_inference.read_vcf_samples) with the metadata
+     before cluster inference starts, instead of after hours of inference.
+     Metadata parsing factored into load_sample_metadata().
+  7. stage_io.py: registered paths are resolved entry by entry; URLs inside
+     per-chromosome maps are kept as-is; null/empty entries raise
+     "paths.<name>.<chrom> is empty" instead of a TypeError traceback.
+     read_tsv rejects a None path.
+  8. stage6: log line now reports pairs actually tested vs. all pairs.
+  9. stage_io.DEFAULT_BOUNDARY_DISTANCE_BP shared by Stage 1 (default) and
+     Stage 2 (fallback) instead of two literal 5000s.
+  10. stage7: config copy simplified to dict(config), comment added.
+
+Tests: 6 new regression tests (Stage 1: metadata mismatch fails before
+inference, .vcf.bgz + comment line, malformed record fails once with its
+location; Stage 9: report with zero Stage 6 associations; new
+test_stage_io.py: URL/relative path resolution, null path message).
+Result: 40/40 pass, pyflakes clean, --test passes for Stages 1-9 with no
+warnings. The malformed-record test was confirmed to fail when the fix is
+reverted. Not committed.
+
+Prompt 4 - Commit the code-review fixes
+---------------------------------------
+Request:
+  "commit this with a message "Apply code-review fixes""
+
+Changes:
+  Created branch code-review-fixes from main and committed the Prompt 3
+  changes (including this prompt_history entry) with the requested message.
+  Nothing was pushed.

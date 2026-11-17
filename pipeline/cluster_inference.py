@@ -71,6 +71,31 @@ class InferenceSettings:
     tolerance: float = 1e-5
 
 
+class VcfRecordError(ValueError):
+    """A VCF data line could not be parsed (as opposed to the file being unindexable)."""
+
+
+def is_gzip_file(path: Path) -> bool:
+    """True for gzip/BGZF content, whatever the file extension (.gz, .bgz, ...)."""
+    with open(path, "rb") as handle:
+        return handle.read(2) == b"\x1f\x8b"
+
+
+def open_vcf_text(path: Path):
+    return gzip.open(path, "rt") if is_gzip_file(path) else open(path, "rt")
+
+
+def read_vcf_samples(path: Path) -> list[str]:
+    """Sample names from the #CHROM header line, without reading any records."""
+    with open_vcf_text(path) as handle:
+        for line in handle:
+            if line.startswith("#CHROM"):
+                return line.rstrip("\n").split("\t")[9:]
+            if not line.startswith("#"):
+                break
+    raise ValueError(f"{path} has no #CHROM header line; is it a VCF file?")
+
+
 def _canonical_sample_ids(original_samples: list[str]) -> list[str]:
     canonical = [canonical_sample_id(sample) for sample in original_samples]
     duplicates = sorted(sample for sample, count in Counter(canonical).items() if count > 1)
@@ -109,9 +134,13 @@ def split_vcf_by_chromosome(
             writers[chrom].writerow(METADATA_COLUMNS + samples)
 
     def write_record(fields: list[str]) -> None:
-        metadata, genotypes, shortened = parse_vcf_fields(
-            fields, record_counts[normalize_chrom(fields[0])] + 1, max_sv_id_length
-        )
+        try:
+            metadata, genotypes, shortened = parse_vcf_fields(
+                fields, record_counts[normalize_chrom(fields[0])] + 1, max_sv_id_length
+            )
+        except (ValueError, IndexError) as error:
+            location = ":".join(fields[:2])
+            raise VcfRecordError(f"Malformed VCF record at {location} in {vcf_path}: {error}") from error
         chrom = metadata[2]
         writers[chrom].writerow(metadata + genotypes)
         record_counts[chrom] += 1
@@ -130,11 +159,12 @@ def split_vcf_by_chromosome(
             filter_counts[chrom].clear()
             genotype_counts[chrom].clear()
 
+    compressed = is_gzip_file(vcf_path)
     try:
         try:
-            # Only bgzipped input is indexed: pysam would otherwise compress (and
+            # Only compressed input is indexed: pysam would otherwise compress (and
             # replace) an uncompressed VCF in the user's input directory.
-            if not str(vcf_path).endswith(".gz"):
+            if not compressed:
                 raise ValueError("VCF is not compressed")
             if not Path(f"{vcf_path}.tbi").exists():
                 log.info("Creating a Tabix index for %s", vcf_path)
@@ -152,11 +182,16 @@ def split_vcf_by_chromosome(
             with ThreadPoolExecutor(max_workers=min(chrom_workers, len(chroms))) as executor:
                 for future in [executor.submit(extract_chromosome, chrom) for chrom in chroms]:
                     future.result()
+        except VcfRecordError:
+            raise
         except (OSError, ValueError) as error:
-            log.info("Indexed VCF access unavailable (%s); streaming the VCF instead", error)
+            # Unindexable input (plain gzip, uncompressed, contig naming mismatch):
+            # fall back to one sequential pass over the file.
+            (log.warning if compressed else log.info)(
+                "Indexed VCF access unavailable (%s); streaming the VCF instead", error
+            )
             reset_outputs()
-            opener = gzip.open if str(vcf_path).endswith(".gz") else open
-            with opener(vcf_path, "rt") as source:
+            with open_vcf_text(vcf_path) as source:
                 for line in source:
                     if line.startswith("##"):
                         continue
@@ -164,6 +199,8 @@ def split_vcf_by_chromosome(
                         original_samples = line.rstrip("\n").split("\t")[9:]
                         canonical_samples = _canonical_sample_ids(original_samples)
                         open_writers(canonical_samples)
+                        continue
+                    if line.startswith("#"):
                         continue
                     if canonical_samples is None:
                         raise ValueError(f"{vcf_path} has no #CHROM header line")

@@ -757,8 +757,9 @@ def main(argv: list[str] | None = None) -> None:
         variance.to_csv(paths["sv_pca_variance"], sep="\t", index=False)
         plot_pca(coordinates, paths["sv_pca_plot"])
 
-    upstream = {key: value for key, value in config.items()}
+    upstream = dict(config)
     if args.skip_pca:
+        # Do not carry forward PCA outputs registered by an earlier Stage 7 run.
         upstream["paths"] = {
             key: value for key, value in config["paths"].items()
             if key not in ("sv_pca_coordinates", "sv_pca_variance", "sv_pca_plot")

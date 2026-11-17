@@ -377,14 +377,21 @@ def run_report(
     q_threshold: float = 0.05,
 ) -> None:
     paths = resolved_paths(config_paths)
-    enrichment = read_tsv(paths["sv_type_enrichment"], ["q_value", "observed_count", "expected_count"])
+    # Columns build_facts uses unconditionally; optional ones are checked where used.
+    enrichment = read_tsv(
+        paths["sv_type_enrichment"],
+        ["haploblock_id", "sv_type", "observed_count", "expected_count", "p_value", "q_value", "flagged"],
+    )
     associations = read_tsv(paths["sv_cluster_summary"], ["q_value", "p_value", "population_adjusted_r"])
     annotations = read_tsv(
         paths["annotated_sv_candidates"],
         ["q_value", "population_adjusted_r", "call_quality", "consequence_priority"],
     )
     representation = read_tsv(paths["sv_hash_representation"], ["representation_pattern"])
-    pca_variance = read_tsv(paths["sv_pca_variance"]) if "sv_pca_variance" in paths else None
+    pca_variance = (
+        read_tsv(paths["sv_pca_variance"], ["component", "explained_variance_ratio", "n_variants"])
+        if "sv_pca_variance" in paths else None
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     facts = build_facts(

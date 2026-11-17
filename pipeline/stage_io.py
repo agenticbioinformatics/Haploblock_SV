@@ -18,21 +18,34 @@ import yaml
 
 log = logging.getLogger("haploblock_sv")
 
+# Stage 1 records this in config.yaml; Stage 2 falls back to it for older configs.
+DEFAULT_BOUNDARY_DISTANCE_BP = 5000
+
 
 def resolve_path(path: str | Path, base_dir: Path) -> Path:
     path = Path(path)
     return path if path.is_absolute() else base_dir / path
 
 
+def _resolve_registered_path(value: object, label: str, base_dir: Path) -> object:
+    if value is None or value == "":
+        raise ValueError(f"Stage config entry paths.{label} is empty")
+    if isinstance(value, str) and not value.startswith(("http://", "https://")):
+        return str(resolve_path(value, base_dir))
+    return value
+
+
 def _resolve_registered_paths(paths: dict, base_dir: Path) -> dict:
+    """Make local paths absolute; per-chromosome maps are resolved entry by entry."""
     resolved = {}
     for name, value in paths.items():
         if isinstance(value, dict):
-            resolved[name] = {key: str(resolve_path(item, base_dir)) for key, item in value.items()}
-        elif isinstance(value, str) and not value.startswith(("http://", "https://")):
-            resolved[name] = str(resolve_path(value, base_dir))
+            resolved[name] = {
+                key: _resolve_registered_path(item, f"{name}.{key}", base_dir)
+                for key, item in value.items()
+            }
         else:
-            resolved[name] = value
+            resolved[name] = _resolve_registered_path(value, name, base_dir)
     return resolved
 
 
@@ -54,6 +67,8 @@ def load_config(path: Path, required_paths: Iterable[str] = ()) -> dict:
 
 
 def read_tsv(path: str | Path, required_columns: Sequence[str] = (), **kwargs) -> pd.DataFrame:
+    if path is None:
+        raise ValueError("Input table path is missing")
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Input table not found: {path}")

@@ -44,6 +44,10 @@ ASSOCIATION_COLUMNS = [
     "population_adjusted_r", "p_value", "q_value", "permutations_used",
     "informative_populations", "directional_consistency",
 ]
+# One row per SV-block pair: the best association row plus the summary fields.
+SUMMARY_COLUMNS = [
+    "best_cluster_id" if column == "cluster_id" else column for column in ASSOCIATION_COLUMNS
+] + ["best_enriched_cluster_id", "best_depleted_cluster_id", "association_pattern"]
 
 
 def population_adjusted_correlations(
@@ -488,13 +492,7 @@ def summarize_associations(
     min_abs_r: float,
 ) -> pd.DataFrame:
     if associations.empty:
-        return pd.DataFrame(columns=[
-            *METADATA_COLUMNS, "haploblock_id", "best_cluster_id", "association_pattern",
-            "best_enriched_cluster_id", "best_depleted_cluster_id",
-            "association_direction", "carrier_rate_difference",
-            "population_adjusted_r", "q_value", "informative_populations",
-            "directional_consistency",
-        ])
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
     keys = ["sv_record_id", "haploblock_id"]
     ranked = associations.assign(abs_r=associations["population_adjusted_r"].abs())
     best = (
@@ -595,15 +593,20 @@ def main(argv: list[str] | None = None) -> None:
             config["paths"]["cluster_memberships"][chrom],
             ["haploblock_id", "sample_id", "haplotype", "cluster_id"],
         )
-        all_associations.append(
-            association_table(
-                sv, sv_blocks, memberships, metadata, args.permutations, args.seed,
-                args.min_cluster_haplotypes, args.min_population_samples,
-                args.refinement_permutations, args.refinement_p_threshold, args.threads,
-                args.initial_permutations, args.initial_p_threshold, args.min_abs_r,
-            )
+        chrom_associations = association_table(
+            sv, sv_blocks, memberships, metadata, args.permutations, args.seed,
+            args.min_cluster_haplotypes, args.min_population_samples,
+            args.refinement_permutations, args.refinement_p_threshold, args.threads,
+            args.initial_permutations, args.initial_p_threshold, args.min_abs_r,
         )
-        log.info("%s: tested %d SV–block pairs", chrom, len(sv_blocks))
+        all_associations.append(chrom_associations)
+        pair_keys = ["sv_record_id", "haploblock_id"]
+        log.info(
+            "%s: tested %d of %d SV–block pairs (others lacked enough called samples, "
+            "dosage variation or eligible clusters)",
+            chrom, len(chrom_associations[pair_keys].drop_duplicates()),
+            len(sv_blocks[pair_keys].drop_duplicates()),
+        )
     associations = pd.concat(all_associations, ignore_index=True)
     if not associations.empty:
         # Recompute q-values across all chromosomes, not per chromosome.

@@ -14,9 +14,15 @@ from pathlib import Path
 
 import yaml
 
-from cluster_inference import ALL_CHROMS, DEFAULT_BASE_URL, InferenceSettings, request_with_retries
+from cluster_inference import (
+    ALL_CHROMS,
+    DEFAULT_BASE_URL,
+    InferenceSettings,
+    read_vcf_samples,
+    request_with_retries,
+)
 from cluster_inference import run as run_cluster_aware
-from stage_io import run_cli
+from stage_io import DEFAULT_BOUNDARY_DISTANCE_BP, run_cli
 from sv_contract import canonical_sample_id, normalize_chrom
 
 
@@ -47,15 +53,10 @@ def parse_chroms(value: str) -> list[str]:
     return chroms
 
 
-def normalize_sample_metadata(source: Path, samples_path: Path, destination: Path) -> None:
-    """Rename metadata columns to the contract and keep only VCF samples, in VCF order."""
-    with samples_path.open() as handle:
-        sample_rows = list(csv.DictReader(handle, delimiter="\t"))
-    original_to_canonical = {
-        row["original_sample_id"]: row["sample_id"]
-        for row in sample_rows
-    }
-
+def load_sample_metadata(
+    source: Path, original_to_canonical: dict[str, str]
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Read sample metadata with contract column names, keyed by canonical sample ID."""
     with source.open() as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         fieldnames = [METADATA_COLUMN_NAMES.get(name, name) for name in reader.fieldnames or []]
@@ -75,6 +76,32 @@ def normalize_sample_metadata(source: Path, samples_path: Path, destination: Pat
                 row["sample_id"], canonical_sample_id(row["sample_id"])
             )
             metadata_by_sample[row["sample_id"]] = row
+    return fieldnames, metadata_by_sample
+
+
+def check_metadata_matches_vcf(metadata_source: Path, vcf: Path) -> None:
+    """Fail before inference if no VCF sample has population metadata."""
+    vcf_samples = {canonical_sample_id(sample) for sample in read_vcf_samples(vcf)}
+    _, metadata_by_sample = load_sample_metadata(metadata_source, {})
+    matched = len(vcf_samples & set(metadata_by_sample))
+    if matched == 0:
+        raise ValueError(
+            f"No VCF sample in {vcf} has a row in the sample metadata {metadata_source}; "
+            "check that the sample IDs match"
+        )
+    if matched < len(vcf_samples):
+        log.warning(
+            "%d of %d VCF samples have no population metadata and will be ignored by Stages 4, 6 and 7",
+            len(vcf_samples) - matched, len(vcf_samples),
+        )
+
+
+def normalize_sample_metadata(source: Path, samples_path: Path, destination: Path) -> None:
+    """Rename metadata columns to the contract and keep only VCF samples, in VCF order."""
+    with samples_path.open() as handle:
+        sample_rows = list(csv.DictReader(handle, delimiter="\t"))
+    original_to_canonical = {row["original_sample_id"]: row["sample_id"] for row in sample_rows}
+    fieldnames, metadata_by_sample = load_sample_metadata(source, original_to_canonical)
 
     matched = 0
     with destination.open("w", newline="") as handle:
@@ -86,11 +113,6 @@ def normalize_sample_metadata(source: Path, samples_path: Path, destination: Pat
                 matched += 1
     if matched == 0:
         raise ValueError(f"No VCF sample has a row in the sample metadata {source}")
-    if matched < len(sample_rows):
-        log.warning(
-            "%d of %d VCF samples have no population metadata and will be ignored by Stages 4, 6 and 7",
-            len(sample_rows) - matched, len(sample_rows),
-        )
 
 
 def fetch_default(path: Path, url: str, retries: int, description: str) -> None:
@@ -129,7 +151,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-iterations", type=int, default=25)
     parser.add_argument("--tolerance", type=float, default=1e-5)
     parser.add_argument(
-        "--boundary-distance-bp", type=int, default=5000,
+        "--boundary-distance-bp", type=int, default=DEFAULT_BOUNDARY_DISTANCE_BP,
         help="Recorded in config.yaml as the Stage 2 near-boundary distance",
     )
     parser.add_argument(
@@ -166,6 +188,7 @@ def main(argv: list[str] | None = None) -> None:
     if metadata_source is None:
         metadata_source = args.out_dir / Path(DEFAULT_SAMPLE_METADATA_URL).name
         fetch_default(metadata_source, DEFAULT_SAMPLE_METADATA_URL, args.retries, "sample metadata")
+    check_metadata_matches_vcf(metadata_source, args.vcf)
 
     gtf_source = args.gtf
     if gtf_source is None:

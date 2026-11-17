@@ -145,3 +145,40 @@ def test_agent_receives_only_serialized_facts() -> None:
     assert captured["model"] == "test-model"
     assert json.loads(captured["input"])["stage"]["count"] == 2
     assert "Every number must come directly" in captured["instructions"]
+
+
+def test_report_handles_stage6_with_no_associations(tmp_path: Path) -> None:
+    import stage6_cluster_association
+
+    enrichment_path = tmp_path / "enrichment.tsv"
+    summary_path = tmp_path / "summary.tsv"
+    representation_path = tmp_path / "representation.tsv"
+    annotations_path = tmp_path / "annotations.tsv"
+    write_table(enrichment_path, [
+        {"haploblock_id": "b1", "sv_type": "DEL", "observed_count": 1,
+         "expected_count": 1.0, "p_value": 1.0, "q_value": 1.0, "flagged": False},
+    ])
+    empty_summary = stage6_cluster_association.summarize_associations(
+        pd.DataFrame(columns=stage6_cluster_association.ASSOCIATION_COLUMNS), 0.05, 0.3
+    )
+    empty_summary.to_csv(summary_path, sep="\t", index=False)
+    pd.DataFrame(columns=["sv_record_id", "haploblock_id", "representation_pattern"]).to_csv(
+        representation_path, sep="\t", index=False
+    )
+    pd.DataFrame(columns=[
+        *empty_summary.columns, "consequence", "genes", "overlap_basis",
+        "call_quality", "consequence_priority",
+    ]).to_csv(annotations_path, sep="\t", index=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"paths": {
+        "sv_type_enrichment": str(enrichment_path),
+        "sv_cluster_summary": str(summary_path),
+        "sv_hash_representation": str(representation_path),
+        "annotated_sv_candidates": str(annotations_path),
+    }}))
+
+    stage9_report.run_report([config_path], tmp_path / "report", agent_mode="off")
+
+    facts = json.loads((tmp_path / "report" / "report_facts.json").read_text())
+    assert facts["stage6_cluster_association"]["n_sv_haploblock_pairs"] == 0
+    assert facts["stage6_cluster_association"]["n_significant"] == 0

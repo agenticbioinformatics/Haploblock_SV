@@ -5,6 +5,8 @@ import gzip
 import json
 from pathlib import Path
 
+import pysam
+import pytest
 import yaml
 
 
@@ -133,7 +135,7 @@ def test_stage1_downloads_default_ont_metadata(tmp_path: Path, monkeypatch) -> N
     )
 
     out_dir = tmp_path / "stage1_output"
-    (tmp_path / "cohort.vcf.gz").touch()
+    write_test_vcf(tmp_path / "cohort.vcf.gz")
     stage1_cluster_aware.main(
         ["--vcf", str(tmp_path / "cohort.vcf.gz"), "--chroms", "chr1", "--out-dir", str(out_dir)]
     )
@@ -334,3 +336,59 @@ def test_completed_chromosome_must_match_cluster_source(tmp_path: Path) -> None:
     assert not cluster_inference.chromosome_is_complete(
         *common, "https://source-b.example.test", None, *settings
     )
+
+
+def test_metadata_mismatch_fails_before_inference(tmp_path: Path, monkeypatch) -> None:
+    vcf_path = tmp_path / "cohort.vcf.gz"
+    write_test_vcf(vcf_path)
+    metadata_path = tmp_path / "metadata.tsv"
+    metadata_path.write_text("sample_id\tpopulation\nOTHER1\tPOP1\n")
+    (tmp_path / "genes.gtf").write_text("")
+
+    def inference_must_not_run(settings) -> None:
+        raise AssertionError("cluster inference ran before the metadata check")
+
+    monkeypatch.setattr(stage1_cluster_aware, "run_cluster_aware", inference_must_not_run)
+    with pytest.raises(ValueError, match="No VCF sample"):
+        stage1_cluster_aware.main([
+            "--vcf", str(vcf_path), "--sample-metadata", str(metadata_path),
+            "--gtf", str(tmp_path / "genes.gtf"), "--chroms", "chr1",
+            "--out-dir", str(tmp_path / "out"),
+        ])
+
+
+def write_bgzipped_vcf(path: Path, records: list[str]) -> None:
+    text = path.with_name("plain.vcf")
+    text.write_text("\n".join([
+        "##fileformat=VCFv4.2",
+        "##contig=<ID=chr1,length=10000>",
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1",
+        *records,
+    ]) + "\n")
+    pysam.tabix_compress(str(text), str(path), force=True)
+
+
+def test_bgzipped_vcf_with_bgz_extension_and_comment_line(tmp_path: Path) -> None:
+    vcf_path = tmp_path / "cohort.vcf.bgz"
+    write_bgzipped_vcf(vcf_path, [
+        "chr1\t101\tsv1\tN\t<DEL>\t.\tPASS\tEND=200;SVTYPE=DEL\tGT\t0/1",
+        "# a stray comment line",
+        "chr1\t301\tsv2\tN\t<INS>\t.\tPASS\tEND=302;SVTYPE=INS\tGT\t1/1",
+    ])
+
+    tables = cluster_inference.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
+
+    rows = read_tsv(tables["chr1"])
+    assert [row["sv_id"] for row in rows] == ["sv1", "sv2"]
+
+
+def test_malformed_record_fails_once_with_location(tmp_path: Path, caplog) -> None:
+    vcf_path = tmp_path / "cohort.vcf.gz"
+    write_bgzipped_vcf(vcf_path, [
+        "chr1\t101\tsv1\tN\t<DEL>\t.\tPASS\tEND=200;SVTYPE=DEL\tGT\t0/1",
+        "chr1\t301\tsv2\tN\t<INS>\t.\tPASS\tEND=302;SVTYPE=INS\tDP\t7",
+    ])
+
+    with pytest.raises(cluster_inference.VcfRecordError, match="chr1:301"):
+        cluster_inference.split_vcf_by_chromosome(vcf_path, ["chr1"], tmp_path / "out", 80)
+    assert "streaming the VCF instead" not in caplog.text
