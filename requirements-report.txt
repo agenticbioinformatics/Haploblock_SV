@@ -1,0 +1,4 @@
+# Stage 9 report rendering and optional language-model interpretation
+-r requirements.txt
+mistune>=3.0
+openai>=1.40

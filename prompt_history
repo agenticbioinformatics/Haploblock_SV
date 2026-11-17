@@ -1,0 +1,163 @@
+Haploblock_SV cleanup session log
+=================================
+
+Prompt 1 - Clean up the hackathon repository
+--------------------------------------------
+Request:
+  "this is a repository from a hackathon. clean it up. the aims and
+  deliverables of the project are described in the README. the directory
+  claude-first-prototype contains the pipeline -- all code should be in a
+  subdirectory called pipeline instead. in README there is a Results
+  sections -- keep it for now, do not modify or remove it."
+
+Clarifications from the user during the session:
+  - README: keep References, Contributors, Acknowledgements and the logo
+    banner in addition to the minimal Overview/Installation/Usage/Data
+    sections and the untouched Results section.
+  - Deletion approved only for the superseded flowchart PNG and the GIAB
+    Stage 0 example VCFs. PROMPTS.md and CHANGELOG.md are kept (moved to
+    docs/).
+
+Baseline before changes: 34/36 tests passed. Failing: Stage 4 test (config
+fixture lacked sv_block_summary, which Stage 4 now requires) and Stage 9
+test (`str | None` annotation evaluated at runtime on Python 3.9).
+
+Changes:
+  Layout (all moves done with git mv, history preserved)
+    claude-first-prototype/pipeline/*  -> pipeline/
+      stage_0_mergingvcf.py         -> stage0_merge_vcfs.py
+      stage2_intersect.py           -> stage2_boundary_classification.py
+      stage7_information_gain.py    -> stage7_hash_representation.py
+      match_svs_to_clusters.py      -> cluster_inference.py (Stage 1 library)
+      sv_dosage.py                  -> genotypes.py
+    claude-first-prototype/tests/*   -> pipeline/tests/ (renamed to match)
+    claude-first-prototype/docs/*    -> docs/
+    claude-first-prototype/PROMPTS.md, CHANGELOG.md -> docs/
+    requirements.txt -> repo root; requirements-stage9.txt ->
+      requirements-report.txt
+    flowchart_haploblock_SV_upd.png -> docs/flowchart_haploblock_SV.png
+  Deleted
+    flowchart_haploblock_SV.png (superseded, unreferenced)
+    claude-first-prototype/tests/giab_data_teststage0/ (3.3 MB GIAB VCFs,
+      unused by any test). Original sources, if ever needed:
+      https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data_somatic/HG008/Liss_lab/analysis/NIST_HG008-T_somatic-stvar-CNV_DraftBenchmark_V0.5-20260318/GRCh38_HG008-T-V0.5_somatic-stvar_ALL.draftbenchmark.vcf.gz
+      https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data_somatic/HG008/Liss_lab/analysis/HKU_HiFi_ClairS_v0.1.7-SNV-INDEL_20240326/HG008_T_N-P_HiFi_GRCh38-GIABv3_ClairS_v0.1.7_indel.vcf.gz
+    claude-first-prototype/README.md, STAGE0_SUMMARY.md (content merged into
+      docs/README.md and docs/stage0_cohort_sv_merging.md; directory removed)
+
+  New shared modules (pipeline/)
+    stage_io.py       load_config (validates file + required registered paths,
+                      resolves relative paths), read_tsv (file/column checks),
+                      read_sample_metadata, write_stage_config (carry-forward of
+                      upstream config), run_cli (clean one-line error + exit 1
+                      instead of a traceback for missing/malformed input).
+                      Replaces resolve_path copies in Stages 4/5 and the
+                      cross-stage imports (6/7/8 imported it from Stage 4).
+    synthetic_data.py tiny synthetic cohort (1 chrom, 2 haploblocks x 3
+                      clusters, 36 samples / 3 populations, DEL/INS with
+                      cluster-concentrated carriers, local cluster files, GTF)
+                      and self_test(stage), which runs the stage plus the
+                      upstream stages it needs in a temp dir.
+    tests/conftest.py replaces the sys.path hack copied into every test file.
+
+  Code cleanup
+    sv_contract.py    new parse_vcf_fields(): the single VCF-record parser.
+    cluster_inference.py (Stage 1 core)
+      - VCF splitting: indexed and streaming paths shared one copy-pasted
+        parser; now both call parse_vcf_fields.
+      - Fix: pysam.tabix_index was called on uncompressed VCFs, which
+        bgzips and deletes the user's input file; only .gz input is indexed
+        now, other input is streamed (plain-text VCFs now also supported).
+      - Removed duplicate standalone CLI (parse_args/main) and
+        remove_legacy_outputs (deleted outputs of an older prototype).
+      - run() takes a typed InferenceSettings dataclass.
+      - Magic number 3 -> MIN_STANDARD_CALLABLE_HAPLOTYPES.
+    stage1_cluster_aware.py
+      - --vcf is now required (was a hidden default path relative to the old
+        repo layout); input files validated up front.
+      - Sample metadata download is cached like the GTF (was re-downloaded
+        on every run); downloads written atomically.
+      - Metadata validated (required columns, at least one sample matches the
+        VCF; warns about samples without population labels).
+    stage2_boundary_classification.py
+      - Removed the VCF re-reading fallback (load_sv_metadata) and
+        --max-sv-id-length: Stage 1 always registers sv_genotypes.
+      - Default --out-dir renamed stage2_boundary_output -> stage2_output.
+    stage4_classify_af.py
+      - genotype_counts moved to genotypes.py (sv_dosage imported it from
+        Stage 4, creating a helper -> stage dependency).
+      - matplotlib imported lazily with the Agg backend (headless servers).
+      - Removed unused parameter of write_informative_summary; simplified
+        load_haploblock_assignments; guard against zero SVs.
+    stage5_type_enrichment.py
+      - benjamini_hochberg moved to genotypes.py (Stage 6 imported it from
+        Stage 5); guard against zero total haploblock length.
+    stage6_cluster_association.py
+      - Removed unused functions centered, correlation,
+        population_consistency, max_statistic_p_values (the scalar
+        correlation moved into the test as a reference implementation).
+      - Magic numbers named: MIN_CALLED_SAMPLES, MIN_INFORMATIVE_POPULATIONS,
+        MIN_DIRECTIONAL_CONSISTENCY, MAX_PERMUTATION_ELEMENTS.
+      - Fix: empty summary table lacked sv_record_id and the other metadata
+        columns, which broke Stage 8 when nothing was tested.
+      - Records q/min-|r| thresholds in its config.
+    stage7_information_gain.py -> stage7_hash_representation.py
+      - pca_tables now has a single signature (sample x variant dosage
+        matrix) instead of two modes with an ignored DataFrame argument.
+      - Guard against zero total PCA variance; warning when no SV passes
+        PCA filters; matplotlib Agg backend.
+      - Fixed pandas FutureWarnings (silent object downcasting in fillna).
+    stage8_candidate_annotation.py
+      - GTF existence/content validated; fix crash on zero candidates.
+    stage9_report.py
+      - Removed compatibility branches for older Stage 7/8 outputs
+        (information-gain-only report, candidate_score, filter-based
+        pass_precise): current stages always write the newer tables.
+      - Hard-coded q < 0.05 replaced by --q-threshold; report_facts.json key
+        n_significant_q_lt_0_05 renamed to n_significant (+ q_threshold).
+      - mistune imported lazily; configs validated for the required tables.
+    stage0_merge_vcfs.py
+      - Errors go through run_cli (same exit code 1 + message as before).
+    All stage scripts
+      - logging configured in run_cli instead of at import time.
+      - --test flag: runs the stage on synthetic data (Stage 0 additionally
+        needs bcftools/truvari), ~1 s each, no network access.
+      - --config defaults now point at the documented upstream stage's
+        output directory; required options validated with clear messages.
+
+  Tests (pipeline/tests)
+    - Updated for renamed modules/APIs; fixed both baseline failures (Stage
+      4 fixture now includes sv_block_summary; Stage 9 uses Optional[...]).
+    - Removed 2 tests for deleted code (legacy-output cleanup, Stage 2 VCF
+      fallback). Result: 34/34 pass; pyflakes clean.
+    - All --test self-tests pass for Stages 1-9. Stage 0 --test could not be
+      run here (bcftools/truvari not installed) and fails with a clear
+      "bcftools not found" message.
+
+  Requirements
+    requirements.txt: removed bcftools (not a pip package) and truvari
+    (documented as conda install instead); added scipy/pandas/requests/pytest
+    lower bounds. requirements-report.txt includes requirements.txt plus
+    mistune/openai.
+  .gitignore: replaced claude-first-prototype/* patterns with stage*_output/.
+
+  Docs
+    README.md rewritten: logo banner, Overview, Installation, Usage (one
+    entry per stage with command and --test), Data (sources, formats,
+    layout); Results section kept byte-for-byte unchanged; Contributors,
+    Acknowledgements and References kept. "Future steps", "Pipeline
+    Overview" and "Development status" sections dropped.
+    docs/README.md: stage/script/config index plus the result-interpretation
+    guide and data caveats from the old prototype README.
+    docs/stage0_cohort_sv_merging.md rewritten (said "not implemented").
+    Per-stage docs: run blocks replaced by a pointer to the README Usage.
+
+Prompt 2 - Commit the clean-up
+------------------------------
+Request:
+  "commit this with a message "BIG BANG post-hackathon clean-up""
+
+Changes:
+  Created branch post-hackathon-cleanup from main and committed all
+  changes from Prompt 1 (including this prompt_history file) in a single
+  commit with the requested message. Nothing was pushed.

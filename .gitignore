@@ -1,11 +1,16 @@
-claude-first-prototype/local_test_output/
+# Pipeline outputs and local inputs
+stage*_output/
+input/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Editors / OS
+.idea/
 .DS_Store
 ._*
-.idea/
-__pycache__/
-.pytest_cache/
-*.py[cod]
-claude-first-prototype/stage*_output/
-input/
-.venv/
+
 .github/agents/sv-pipeline-tester.agent.md

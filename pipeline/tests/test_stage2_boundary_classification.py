@@ -1,0 +1,92 @@
+"""Contract tests for exact crossing and boundary proximity."""
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+import yaml
+
+
+from stage2_boundary_classification import classify_sv_positions, main
+
+
+def test_crossing_and_proximity_are_separate() -> None:
+    haploblocks = pd.DataFrame(
+        [
+            {"haploblock_id": "block1", "chrom": "chr1", "start": 0, "end": 100},
+            {"haploblock_id": "block2", "chrom": "chr1", "start": 100, "end": 200},
+        ]
+    )
+    variants = pd.DataFrame(
+        [
+            {"sv_id": "inside", "chrom": "chr1", "start": 20, "end": 30},
+            {"sv_id": "near", "chrom": "chr1", "start": 95, "end": 99},
+            {"sv_id": "crossing", "chrom": "chr1", "start": 95, "end": 105},
+            {"sv_id": "outside", "chrom": "chr1", "start": 250, "end": 260},
+            {"sv_id": "near_outside", "chrom": "chr1", "start": 201, "end": 205},
+        ]
+    )
+
+    result = classify_sv_positions(variants, haploblocks, boundary_bp=10).set_index("sv_id")
+
+    assert result.loc["inside", "position_class"] == "within_block"
+    assert not result.loc["inside", "near_boundary"]
+    assert result.loc["near", "position_class"] == "within_block"
+    assert result.loc["near", "near_boundary"]
+    assert result.loc["crossing", "position_class"] == "boundary_crossing"
+    assert result.loc["crossing", "haploblock_id"] == "block1,block2"
+    assert result.loc["crossing", "near_boundary"]
+    assert result.loc["outside", "position_class"] == "outside_block"
+    assert not result.loc["outside", "near_boundary"]
+    assert result.loc["near_outside", "position_class"] == "outside_block"
+    assert result.loc["near_outside", "near_boundary"]
+
+
+def test_overlapping_haploblocks_are_rejected() -> None:
+    haploblocks = pd.DataFrame([
+        {"haploblock_id": "block1", "chrom": "chr1", "start": 0, "end": 100},
+        {"haploblock_id": "block2", "chrom": "chr1", "start": 50, "end": 150},
+    ])
+    variants = pd.DataFrame([{"sv_id": "sv1", "chrom": "chr1", "start": 75, "end": 80}])
+
+    with pytest.raises(ValueError, match="Overlapping haploblocks"):
+        classify_sv_positions(variants, haploblocks, boundary_bp=10)
+
+
+def test_stage2_reuses_stage1_metadata_without_reading_the_vcf(tmp_path: Path) -> None:
+    genotype_path = tmp_path / "sv_genotypes.chr1.tsv"
+    pd.DataFrame(
+        [{
+            "sv_record_id": "chr1_record_1",
+            "sv_id": "sv1",
+            "chrom": "chr1",
+            "start": 20,
+            "end": 30,
+            "sv_type": "DEL",
+            "length": -10,
+            "filter": "PASS",
+            "imprecise": False,
+            "sample1": "0/1",
+        }]
+    ).to_csv(genotype_path, sep="\t", index=False)
+    haploblock_path = tmp_path / "haploblocks.chr1.tsv"
+    pd.DataFrame([{"haploblock_id": "block1", "chrom": "chr1", "start": 0, "end": 100}]).to_csv(
+        haploblock_path, sep="\t", index=False
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "paths": {
+            "vcf": str(tmp_path / "missing.vcf.gz"),
+            "sv_genotypes": {"chr1": str(genotype_path)},
+            "haploblocks": {"chr1": str(haploblock_path)},
+        },
+        "thresholds": {"boundary_distance_bp": 5000},
+        "settings": {"max_sv_id_length": 80},
+    }))
+
+    output_dir = tmp_path / "stage2"
+    main(["--config", str(config_path), "--out-dir", str(output_dir)])
+
+    result = pd.read_csv(output_dir / "boundary_svs.chr1.tsv", sep="\t")
+    assert result.loc[0, "sv_record_id"] == "chr1_record_1"
+    assert result.loc[0, "position_class"] == "within_block"
